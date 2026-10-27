@@ -3207,6 +3207,13 @@ class GeminiImageToolLabels(unittest.TestCase):
     def test_english_label_is_covered(self):
         self.assertIn("Create image", cig.GEMINI_IMAGE_TOOL_LABELS)
 
+    def test_selector_covers_menuitemcheckbox(self):
+        # Google now renders "制作图片" as role=menuitemcheckbox (read off the
+        # live menu); a bare [role=menuitem] selector misses it and the tool
+        # silently falls back to the chat default (2026-02 regression).
+        src = Path(cig.__file__).read_text(encoding="utf-8")
+        self.assertIn('[role^="menuitem"]', src)
+
 
 class GeminiImageSrcMatching(unittest.TestCase):
     """The result regex has to reject Google's own avatars.
@@ -3437,6 +3444,22 @@ class ContentTypeMismatch(unittest.TestCase):
     def test_default_out_path_follows_the_sniffed_type(self):
         src = Path(cig.__file__).read_text(encoding="utf-8")
         self.assertIn("_default_out_path(args.prompt, _actual_fmt)", src)
+
+    def test_out_extension_follows_sniffed_bytes(self):
+        # gemini ignores --format and returns JPEG; a caller-passed .png must
+        # be renamed to .jpg instead of silently holding the wrong bytes.
+        fixed, did = cig._fix_out_extension(Path("a.png"), "jpeg")
+        self.assertTrue(did)
+        self.assertEqual(fixed, Path("a.jpeg"))  # .jpeg matches _default_out_path's fmt suffix
+
+    def test_out_extension_untouched_when_honest_or_unknown(self):
+        for path, fmt in ((Path("a.jpeg"), "jpeg"), (Path("a.webp"), "webp"),
+                          (Path("a.txt"), "png"), (Path("noext"), "jpeg")):
+            fixed, did = cig._fix_out_extension(path, fmt)
+            self.assertFalse(did)
+            self.assertEqual(fixed, path)
+        fixed, did = cig._fix_out_extension(Path("a.png"), None)
+        self.assertFalse(did)
 
 
 class GeminiBlobDownload(unittest.TestCase):

@@ -3341,19 +3341,26 @@ def _gemini_enable_image_tool(ab, session, remaining, emit) -> bool:
     time.sleep(1.5)
     # Match on the item's own text: the labels are localised and the Angular
     # class names are not contractual, so text is the most durable handle.
+    # [role^="menuitem"] — Google now renders "制作图片" as a menuitemcheckbox,
+    # not a plain menuitem/button, so an exact role match misses it.
     js = r"""(() => {
       const want = %s;
-      const b = [...document.querySelectorAll('button, [role=menuitem]')]
+      const b = [...document.querySelectorAll('button, [role^="menuitem"]')]
         .find(e => want.includes((e.innerText || '').trim()));
       if (!b) return JSON.stringify(false);
       b.click();
       return JSON.stringify(true);
     })()""" % json.dumps(list(GEMINI_IMAGE_TOOL_LABELS))
     try:
-        if _ab_eval(ab, js, session=session, timeout=min(20.0, remaining())):
-            time.sleep(1.5)
-            emit("image tool enabled")
-            return True
+        # The menu populates in two waves: the upload rows render at once, the
+        # image/video/music checkboxes lag another ~8-10s (observed live), so
+        # poll for a generous window before declaring the tool absent.
+        for _ in range(7):
+            if _ab_eval(ab, js, session=session, timeout=min(20.0, remaining())):
+                time.sleep(1.5)
+                emit("image tool enabled")
+                return True
+            time.sleep(2.2)
     except GatewayError:
         pass
     emit("note: image tool not found in the menu; using the chat default")
@@ -3901,6 +3908,20 @@ def _warn_content_type_mismatch(out_path: Path, fmt: str,
         f"(no transcode: this CLI is standard-library-only)",
         file=sys.stderr,
     )
+
+
+def _fix_out_extension(out_path: Path,
+                       actual_fmt: str | None) -> tuple[Path, bool]:
+    """When -o names a different image format than the bytes carry, move the
+    suffix to the real format. "What the bytes actually ARE" also governs
+    caller-supplied names: a .png full of JPEG breaks downstream pipelines
+    (gemini ignores --format and always returns JPEG). Returns (path, fixed).
+    Unknown suffixes are left alone — there is nothing honest to rename to."""
+    ext_fmt = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg", ".webp": "webp"}
+    cur = ext_fmt.get(out_path.suffix.lower())
+    if actual_fmt and cur and cur != actual_fmt:
+        return out_path.with_suffix("." + actual_fmt), True
+    return out_path, False
 
 
 def _positive_int(value: str) -> int:
@@ -7300,13 +7321,18 @@ def main() -> int:
         # backend that ignored --format can't produce a .jpg full of PNG.
         _actual_fmt = _fmt_from_mime(meta.get("content_type")) or args.format
         if args.out:
-            out_path = Path(args.out)
-            if progress:
-                _maybe_warn_extension_mismatch(out_path, args.format)
-            # Data-affecting, so unconditional (like the over-cap ref warning):
-            # a silently mistyped file breaks downstream image pipelines.
-            _warn_content_type_mismatch(out_path, args.format,
-                                        meta.get("content_type"))
+            out_path, _ext_fixed = _fix_out_extension(Path(args.out), _actual_fmt)
+            if _ext_fixed:
+                if progress:
+                    print(f"   .. note: backend returned {_actual_fmt} bytes; "
+                          f"saved as {out_path.name} (no transcode)", file=sys.stderr)
+            else:
+                if progress:
+                    _maybe_warn_extension_mismatch(out_path, args.format)
+                # Data-affecting, so unconditional (like the over-cap ref warning):
+                # a silently mistyped file breaks downstream image pipelines.
+                _warn_content_type_mismatch(out_path, args.format,
+                                            meta.get("content_type"))
         else:
             out_path = _default_out_path(args.prompt, _actual_fmt)
         out_path.parent.mkdir(parents=True, exist_ok=True)
